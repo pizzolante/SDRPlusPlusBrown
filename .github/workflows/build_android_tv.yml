@@ -1,0 +1,40 @@
+name: Build Android TV
+
+on:
+  push:
+    branches:
+      - android-tv-test
+  pull_request:
+    branches:
+      - android-tv-test
+
+jobs:
+  build_android_tv:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch container
+        working-directory: ${{ runner.workspace }}
+        run: git clone https://github.com/sannysanoff/android-sdr-kit
+
+      - name: Build container
+        working-directory: ${{ runner.workspace }}/android-sdr-kit
+        run: docker build --progress=plain -t android-sdr-kit .
+
+      - name: Build
+        run: docker run --name build -v $GITHUB_WORKSPACE:/root/SDRPlusPlus android-sdr-kit /bin/bash -l -c "apt-get update && apt-get install -y unzip && cd /root/SDRPlusPlus/android && gradle -PsdrKitRoot=/sdr-kit --info assembleTvDebug"
+
+      - name: Recover APK
+        working-directory: ${{ runner.workspace }}
+        run: docker cp build:/root/SDRPlusPlus/android/app/build/outputs/apk/tv/debug/app-tv-debug.apk ./ && mv app-tv-debug.apk sdrpp_tv.apk
+
+      - name: Save APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdrpp_android_tv
+          path: ${{ runner.workspace }}/sdrpp_tv.apk
+
+      - name: Update Nightly
+        run: gh release upload rolling ${{ runner.workspace }}/sdrpp_tv.apk -R ${{ github.repository }} --clobber

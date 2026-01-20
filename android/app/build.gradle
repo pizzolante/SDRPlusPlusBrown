@@ -6,6 +6,7 @@ android {
     buildToolsVersion "30.0.3"
 //    ndkVersion "25.1.8937393"
     ndkVersion "25.2.9519653"
+    flavorDimensions "device"
     defaultConfig {
         applicationId "org.sdrppbrown.sdrppbrown"
         minSdkVersion 28
@@ -25,6 +26,17 @@ android {
 
         ndk {
             abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64'
+        }
+    }
+
+    productFlavors {
+        mobile {
+            dimension "device"
+        }
+        tv {
+            dimension "device"
+            applicationIdSuffix ".tv"
+            versionNameSuffix "-tv"
         }
     }
 
@@ -72,6 +84,10 @@ android {
         main {
             assets.srcDirs += ['assets']
             jniLibs.srcDirs += ['bin']
+        }
+        tv {
+            manifest.srcFile 'src/tv/AndroidManifest.xml'
+            res.srcDirs += ['src/tv/res']
         }
     }
 }
