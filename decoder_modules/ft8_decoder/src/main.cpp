@@ -24,6 +24,8 @@
 #include <utils/cty.h>
 #include "module_interface.h"
 #include "ft8_etc/gen_ft8.h"
+#include "psk_reporter.h"
+#include <sstream>
 
 
 using namespace utils;
@@ -503,6 +505,21 @@ public:
         decodedResults.back().current.x = -1;
         decodedResults.back().current.y = -1;
         decodedResultsDrawables.clear();
+
+        // Send to PSK Reporter if enabled
+        if (enablePSKReporter) {
+            PSKReporter::Spot spot;
+            spot.senderCallsign = incoming.shortString;
+            // Extract absolute frequency: frequencyBand (MHz) + frequency offset (Hz)
+            double bandMHz = atof(incoming.frequencyBand.c_str());
+            spot.frequencyHz = (long long)(bandMHz * 1e6) + (long long)incoming.frequency;
+            spot.snr = (int8_t)((int)incoming.strengthRaw);
+            spot.mode = (incoming.mode == DM_FT8) ? "FT8" : "FT4";
+            spot.flowStartSeconds = (uint32_t)(incoming.decodeEndTimestamp / 1000);
+            // Try to extract sender locator from decoded message
+            spot.senderLocator = extractGridFromFT8Message(incoming.detailedString);
+            pskReporter.addSpot(spot);
+        }
     }
 
     void clearDecodedResults(DecodedMode mode) {
@@ -768,6 +785,26 @@ public:
         if (config.conf[name].find("enableALLTXT") != config.conf[name].end()) {
             enableAllTXT = config.conf[name]["enableALLTXT"].get<bool>();
         }
+        // PSK Reporter config
+        strncpy(pskReporterSoftware, "SDR++ Brown", sizeof(pskReporterSoftware) - 1);
+        pskReporterSoftware[sizeof(pskReporterSoftware) - 1] = '\0';
+        pskReporterRig[0] = '\0';
+        pskReporterAntenna[0] = '\0';
+        if (config.conf[name].find("pskReporterSoftware") != config.conf[name].end()) {
+            auto s = config.conf[name]["pskReporterSoftware"].get<std::string>();
+            strncpy(pskReporterSoftware, s.c_str(), sizeof(pskReporterSoftware) - 1);
+            pskReporterSoftware[sizeof(pskReporterSoftware) - 1] = '\0';
+        }
+        if (config.conf[name].find("pskReporterRig") != config.conf[name].end()) {
+            auto s = config.conf[name]["pskReporterRig"].get<std::string>();
+            strncpy(pskReporterRig, s.c_str(), sizeof(pskReporterRig) - 1);
+            pskReporterRig[sizeof(pskReporterRig) - 1] = '\0';
+        }
+        if (config.conf[name].find("pskReporterAntenna") != config.conf[name].end()) {
+            auto s = config.conf[name]["pskReporterAntenna"].get<std::string>();
+            strncpy(pskReporterAntenna, s.c_str(), sizeof(pskReporterAntenna) - 1);
+            pskReporterAntenna[sizeof(pskReporterAntenna) - 1] = '\0';
+        }
         config.release(true);
 
         gui::menu.registerEntry(name, menuHandler, this, this);
@@ -813,6 +850,9 @@ public:
             std::for_each(allDecoders.begin(), allDecoders.end(), [](auto& d) { d->bind(); });
             enabled = true;
             flog::info("FT8 Decoder enabled");
+            if (enablePSKReporter) {
+                applyPSKReporterState();
+            }
         }
     }
 
@@ -821,6 +861,7 @@ public:
         if (enabled) {
             std::for_each(allDecoders.begin(), allDecoders.end(), [](auto& d) { d->unbind(); });
             enabled = false;
+            pskReporter.stop();
             flog::info("FT8 Decoder disabled");
         }
     }
@@ -918,28 +959,90 @@ public:
             ImGui::Text("Error: %s", _this->ft4decoder.decodeError);
             ImGui::PopStyleColor();
         }
-        if (false) {
-            //
-            // PSK Reporter not completed yet
-            //
-            ImGui::LeftLabel("PSKReporter");
-            ImGui::BeginDisabled();
-            if (ImGui::Checkbox(CONCAT("##_enable_psk_reporter_", _this->name), &_this->enablePSKReporter)) {
-                config.acquire();
-                config.conf[_this->name]["enablePSKReporter"] = _this->enablePSKReporter;
-                config.release(true);
-            }
-            ImGui::EndDisabled();
-            ImGui::SameLine();
-            ImGui::Text("using callsign:");
-            ImGui::SameLine();
+
+        // ── PSK Reporter ──────────────────────────────────────────
+        ImGui::Separator();
+        ImGui::TextUnformatted("PSK Reporter");
+        ImGui::LeftLabel("Enable PSK Reporter");
+        if (ImGui::Checkbox(CONCAT("##_enable_psk_reporter_", _this->name), &_this->enablePSKReporter)) {
+            config.acquire();
+            config.conf[_this->name]["enablePSKReporter"] = _this->enablePSKReporter;
+            config.release(true);
+            _this->applyPSKReporterState();
+        }
+        if (_this->enablePSKReporter) {
+            // Callsign (read-only, from Source menu)
+            ImGui::LeftLabel("Callsign");
             ImGui::FillWidth();
-            if (sigpath::iqFrontEnd.operatorCallsign == "") {
-                ImGui::Text("[set up in source menu]");
+            if (sigpath::iqFrontEnd.operatorCallsign.empty()) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0, 1.0f));
+                ImGui::TextUnformatted("[set callsign in Source menu]");
+                ImGui::PopStyleColor();
             } else {
-                ImGui::Text("%s", sigpath::iqFrontEnd.operatorCallsign.c_str());
+                ImGui::TextUnformatted(sigpath::iqFrontEnd.operatorCallsign.c_str());
+            }
+            // Locator (read-only, from Source menu)
+            ImGui::LeftLabel("Locator");
+            ImGui::FillWidth();
+            if (sigpath::iqFrontEnd.operatorLocation.empty()) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0, 1.0f));
+                ImGui::TextUnformatted("[set grid locator in Source menu]");
+                ImGui::PopStyleColor();
+            } else {
+                ImGui::TextUnformatted(sigpath::iqFrontEnd.operatorLocation.c_str());
+            }
+            // Software (editable)
+            ImGui::LeftLabel("Software");
+            ImGui::FillWidth();
+            if (ImGui::InputText(CONCAT("##_pskr_software_", _this->name), _this->pskReporterSoftware, sizeof(_this->pskReporterSoftware))) {
+                config.acquire();
+                config.conf[_this->name]["pskReporterSoftware"] = std::string(_this->pskReporterSoftware);
+                config.release(true);
+                _this->pskReporter.setReceiverInfo(
+                    sigpath::iqFrontEnd.operatorCallsign,
+                    sigpath::iqFrontEnd.operatorLocation,
+                    std::string(_this->pskReporterSoftware),
+                    _this->buildAntennaInfo());
+            }
+            // Rig (editable)
+            ImGui::LeftLabel("Rig");
+            ImGui::FillWidth();
+            if (ImGui::InputText(CONCAT("##_pskr_rig_", _this->name), _this->pskReporterRig, sizeof(_this->pskReporterRig))) {
+                config.acquire();
+                config.conf[_this->name]["pskReporterRig"] = std::string(_this->pskReporterRig);
+                config.release(true);
+                _this->pskReporter.setReceiverInfo(
+                    sigpath::iqFrontEnd.operatorCallsign,
+                    sigpath::iqFrontEnd.operatorLocation,
+                    std::string(_this->pskReporterSoftware),
+                    _this->buildAntennaInfo());
+            }
+            // Antenna (editable)
+            ImGui::LeftLabel("Antenna");
+            ImGui::FillWidth();
+            if (ImGui::InputText(CONCAT("##_pskr_antenna_", _this->name), _this->pskReporterAntenna, sizeof(_this->pskReporterAntenna))) {
+                config.acquire();
+                config.conf[_this->name]["pskReporterAntenna"] = std::string(_this->pskReporterAntenna);
+                config.release(true);
+                _this->pskReporter.setReceiverInfo(
+                    sigpath::iqFrontEnd.operatorCallsign,
+                    sigpath::iqFrontEnd.operatorLocation,
+                    std::string(_this->pskReporterSoftware),
+                    _this->buildAntennaInfo());
+            }
+            // Status
+            int pending = _this->pskReporter.getPendingCount();
+            uint32_t lastSent = _this->pskReporter.getLastSendTime();
+            if (lastSent == 0) {
+                ImGui::Text("Status: pending %d spot(s), not sent yet", pending);
+            } else {
+                uint32_t now = (uint32_t)time(nullptr);
+                ImGui::Text("Status: pending %d spot(s), last sent %us ago", pending, now - lastSent);
             }
         }
+        ImGui::Separator();
+        // ─────────────────────────────────────────────────────────
+
         ImGui::LeftLabel("ALL.TXT log");
         if (ImGui::Checkbox(CONCAT("##_enable_alltxt_", _this->name), &_this->enableAllTXT)) {
             config.acquire();
@@ -967,12 +1070,54 @@ public:
     bool enabled = false;
     char myGrid[10];
     char myCallsign[13];
-    bool enablePSKReporter = true;
+    bool enablePSKReporter = false;
     bool enableAllTXT = false;
     char allTxtPath[1024];
     std::string allTxtPathError;
     int secondsToKeepResults = 120;
     int nthreads = 1;
+
+    // PSK Reporter fields
+    char pskReporterSoftware[128];
+    char pskReporterRig[128];
+    char pskReporterAntenna[128];
+    PSKReporter pskReporter;
+
+    std::string handleDebugCommand(const std::string& cmd, const std::string& args) override {
+        if (cmd == "get_psk_reporter_config") {
+            return json{
+                {"enablePSKReporter",   enablePSKReporter},
+                {"pskReporterSoftware", std::string(pskReporterSoftware)},
+                {"pskReporterRig",      std::string(pskReporterRig)},
+                {"pskReporterAntenna",  std::string(pskReporterAntenna)},
+                {"pendingSpots",        pskReporter.getPendingCount()},
+                {"lastSentTime",        (uint32_t)pskReporter.getLastSendTime()}
+            }.dump();
+        }
+        return json{{"error", "unknown command: " + cmd}}.dump();
+    }
+
+    std::string buildAntennaInfo() const {
+        std::string r;
+        if (pskReporterRig[0]) { r += "Rig: "; r += pskReporterRig; }
+        if (pskReporterAntenna[0]) {
+            if (!r.empty()) r += " / ";
+            r += "Ant: "; r += pskReporterAntenna;
+        }
+        return r;
+    }
+
+    void applyPSKReporterState() {
+        if (enablePSKReporter) {
+            pskReporter.start(
+                sigpath::iqFrontEnd.operatorCallsign,
+                sigpath::iqFrontEnd.operatorLocation,
+                std::string(pskReporterSoftware),
+                buildAntennaInfo());
+        } else {
+            pskReporter.stop();
+        }
+    }
 
     std::string  lastLocation;
     LatLng _myPos = LatLng::invalid();
